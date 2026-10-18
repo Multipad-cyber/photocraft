@@ -7,7 +7,10 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use crate::corpus_pins::{self, AG_PSD_COMMIT, HEIC_DECODER_COMMIT, HEIC_RS_COMMIT, OPENEXR_COMMIT, PHOTOCRAFT_CORPUS_COMMIT, PILLOW_HEIF_COMMIT, PNGSUITE_SHA256, PNGSUITE_URL, PSD_TOOLS_COMMIT};
+use crate::corpus_pins::{
+    self, AG_PSD_COMMIT, HEIC_DECODER_COMMIT, HEIC_RS_COMMIT, OPENEXR_COMMIT, PHOTOCRAFT_CORPUS_COMMIT, PILLOW_HEIF_COMMIT, PNGSUITE_SHA256, PNGSUITE_URL,
+    PSD_TOOLS_COMMIT,
+};
 use crate::pinned::{PinnedCorpus, USER_AGENT};
 use crate::{cargo, root, run};
 

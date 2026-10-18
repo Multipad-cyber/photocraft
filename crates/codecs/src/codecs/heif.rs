@@ -83,8 +83,8 @@ mod tests {
         assert!(matches!(crate::decode_as(F, b""), Err(CodecError::Malformed { .. } | CodecError::Unsupported { .. })));
     }
 
-    /// Found by the `decode_heif` fuzz target: a malformed box made heic-rs 0.1.1, the previous
-    /// decoder, slice out of range. Kept as a regression input: it must be an error, not a crash.
+    /// Found by the `decode_heif` fuzz target: a malformed box made heic-rs 0.1.1 slice out of
+    /// range (fixed in 0.1.2). Kept as a regression input: it must be an error, not a crash.
     #[cfg(feature = "heif")]
     const HEIC_RS_BOX_PANIC: [u8; 72] = [
         0x00, 0x00, 0x00, 0x24, 0x66, 0x74, 0x79, 0x70, 0x68, 0x65, 0x69, 0x63, 0x00, 0x00, 0x00, 0x00, 0x6d, 0x69, 0x66, 0x31, 0x4d, 0x69, 0x50, 0x72, 0x6d,

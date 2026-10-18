@@ -6,6 +6,9 @@
 //! Its API is plain data ([`Info`], [`Decoded`], [`Error`]) so the crate knows nothing about the
 //! rest of PhotoCraft; `photocraft-codecs` adapts it behind its `heif` feature.
 //!
+//! A grid's ICC profile and `nclx` come from its tiles when the grid item itself carries no `colr`,
+//! which is how phone cameras write them; heic-decoder resolves both.
+//!
 //! HEIF records orientation in the container (`irot`/`imir`, plus a `clap` crop), not in EXIF.
 //! [`Options::apply_transforms`] applies them; with it off, the pixels come back as coded.
 //!
@@ -163,16 +166,7 @@ fn decode_unguarded(bytes: &[u8], options: &Options) -> Result<Decoded, Error> {
     };
     let metadata = image.metadata;
     let xmp = metadata.xmp.and_then(|x| String::from_utf8(x).ok()).map(|x| x.trim_end_matches('\0').to_string());
-    Ok(Decoded {
-        width: size(image.width)?,
-        height: size(image.height)?,
-        has_alpha,
-        sixteen_bit,
-        data,
-        icc: metadata.icc_profile,
-        exif: metadata.exif,
-        xmp,
-    })
+    Ok(Decoded { width: size(image.width)?, height: size(image.height)?, has_alpha, sixteen_bit, data, icc: metadata.icc_profile, exif: metadata.exif, xmp })
 }
 
 /// Turns premultiplied RGBA (a `prem` reference in the file) into straight alpha, in place.
@@ -194,7 +188,7 @@ fn unpremultiply<T: Copy + Into<u32> + TryFrom<u32>>(rgba: &mut [T], max: T) {
 mod tests {
     use super::*;
 
-    /// Made heic-rs 0.1.1, the previous decoder, slice out of range in its box parser. Kept as a
+    /// Made heic-rs 0.1.1 slice out of range in its box parser (fixed in 0.1.2). Kept as a
     /// regression input: it must be an error, not a crash.
     const HEIC_RS_BOX_PANIC: [u8; 72] = [
         0x00, 0x00, 0x00, 0x24, 0x66, 0x74, 0x79, 0x70, 0x68, 0x65, 0x69, 0x63, 0x00, 0x00, 0x00, 0x00, 0x6d, 0x69, 0x66, 0x31, 0x4d, 0x69, 0x50, 0x72, 0x6d,
@@ -211,11 +205,13 @@ mod tests {
     }
 
     #[test]
-    fn a_sequence_brand_without_a_track_is_an_error() {
-        // An ftyp and nothing else: a HEIF image sequence would have a moov here instead of a meta.
+    fn a_sequence_brand_without_a_track_is_malformed() {
+        // An ftyp and nothing else: no still image (`meta`) and no image sequence track (`moov`).
+        // A real sequence opens at its first sync frame, so this is a broken file, not an
+        // unsupported one.
         let bytes = b"\0\0\0\x18ftypmsf1\0\0\0\0msf1hevc";
         for r in [probe(bytes).map(|_| ()), decode(bytes, &Options::default()).map(|_| ())] {
-            assert!(r.is_err(), "{r:?}");
+            assert!(matches!(&r, Err(Error::Malformed(m)) if m.contains("meta")), "{r:?}");
         }
     }
 
@@ -251,5 +247,244 @@ mod tests {
         let mut px: [u16; 4] = [65535, 1000, 0, 1];
         unpremultiply(&mut px, u16::MAX);
         assert_eq!(px, [65535, 65535, 0, 1]);
+    }
+
+    // Synthetic containers around one real coded picture, for container behaviour no corpus file
+    // pins: the `imir` direction and where a grid's ICC profile comes from. Each test first checks
+    // the fixture is the shape it claims to be, so a mistake in the builder cannot look like a pass.
+
+    /// `hvcC` of a 64x64 4:2:0 picture: red top left, green top right, blue bottom left, white
+    /// bottom right. Encoded by macOS `sips` from a PNG generated for this test.
+    const QUAD_HVCC: [u8; 104] = [
+        0x01, 0x03, 0x70, 0x00, 0x00, 0x00, 0xb0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x1e, 0xf0, 0x00, 0xfc, 0xfd, 0xf8, 0xf8, 0x00, 0x00, 0x0b, 0x03, 0xa0, 0x00,
+        0x01, 0x00, 0x17, 0x40, 0x01, 0x0c, 0x01, 0xff, 0xff, 0x03, 0x70, 0x00, 0x00, 0x03, 0x00, 0xb0, 0x00, 0x00, 0x03, 0x00, 0x00, 0x03, 0x00, 0x1e, 0x70,
+        0x24, 0xa1, 0x00, 0x01, 0x00, 0x22, 0x42, 0x01, 0x01, 0x03, 0x70, 0x00, 0x00, 0x03, 0x00, 0xb0, 0x00, 0x00, 0x03, 0x00, 0x00, 0x03, 0x00, 0x1e, 0xa0,
+        0x14, 0x20, 0x41, 0xc1, 0x8f, 0x88, 0x7b, 0x91, 0x65, 0x53, 0x70, 0x20, 0x20, 0x60, 0x08, 0xa2, 0x00, 0x01, 0x00, 0x09, 0x44, 0x01, 0xc0, 0x60, 0x84,
+        0xb2, 0x10, 0x14, 0xc9,
+    ];
+    /// Its coded slice, length-prefixed as HEIF stores it.
+    const QUAD_HEVC: [u8; 107] = [
+        0x00, 0x00, 0x00, 0x67, 0x28, 0x01, 0xaf, 0xa3, 0x57, 0x62, 0x9a, 0xec, 0x27, 0xf8, 0x03, 0x13, 0xff, 0xfc, 0xad, 0xfe, 0x87, 0xf5, 0xa9, 0xbc, 0x31,
+        0x41, 0xfe, 0x0d, 0x57, 0xff, 0xf8, 0x11, 0x5f, 0xff, 0xd1, 0x7e, 0xa3, 0xa9, 0x0f, 0xd8, 0x2a, 0x6e, 0x3e, 0x90, 0x0f, 0x2f, 0xf1, 0xc0, 0x0c, 0x3b,
+        0x8f, 0xff, 0x40, 0x51, 0xda, 0x67, 0x8f, 0xe6, 0x09, 0x34, 0x7e, 0xaf, 0x61, 0x13, 0xf7, 0xd0, 0xe2, 0x58, 0xbb, 0xa1, 0xfd, 0xfd, 0xb1, 0xc1, 0x5a,
+        0x32, 0xe1, 0xe4, 0xf9, 0xa1, 0xc6, 0x73, 0xf3, 0x9f, 0xd5, 0x8e, 0xbb, 0xe1, 0x65, 0xb9, 0x4b, 0x7f, 0xc0, 0xdf, 0x58, 0xfe, 0x29, 0x3a, 0x7f, 0x79,
+        0x8e, 0x9f, 0x42, 0xfd, 0x30, 0xff, 0xc0,
+    ];
+
+    /// Stands in for a profile. `colr` hands its payload back without parsing it.
+    const TILE_ICC: &[u8] = b"tile-profile";
+    const GRID_ICC: &[u8] = b"grid-profile";
+
+    const GRID_ID: u16 = 1;
+    const PICTURE_ID: u16 = 2;
+
+    fn bx(kind: &[u8; 4], payload: &[u8]) -> Vec<u8> {
+        let mut v = u32::try_from(payload.len() + 8).unwrap().to_be_bytes().to_vec();
+        v.extend_from_slice(kind);
+        v.extend_from_slice(payload);
+        v
+    }
+
+    /// A box whose first four payload bytes are a version and 24 bits of flags.
+    fn full(kind: &[u8; 4], version: u8, payload: &[u8]) -> Vec<u8> {
+        let mut p = vec![version, 0, 0, 0];
+        p.extend_from_slice(payload);
+        bx(kind, &p)
+    }
+
+    fn hdlr() -> Vec<u8> {
+        let mut p = vec![0; 4];
+        p.extend_from_slice(b"pict");
+        p.extend_from_slice(&[0; 12]);
+        p.push(0);
+        full(b"hdlr", 0, &p)
+    }
+
+    fn infe(id: u16, item_type: &[u8; 4]) -> Vec<u8> {
+        let mut p = id.to_be_bytes().to_vec();
+        p.extend_from_slice(&0u16.to_be_bytes());
+        p.extend_from_slice(item_type);
+        p.push(0);
+        full(b"infe", 2, &p)
+    }
+
+    fn colr_prof(icc: &[u8]) -> Vec<u8> {
+        let mut p = b"prof".to_vec();
+        p.extend_from_slice(icc);
+        bx(b"colr", &p)
+    }
+
+    fn ispe(w: u32, h: u32) -> Vec<u8> {
+        let mut p = w.to_be_bytes().to_vec();
+        p.extend_from_slice(&h.to_be_bytes());
+        full(b"ispe", 0, &p)
+    }
+
+    fn ipma(entries: &[(u16, &[u8])]) -> Vec<u8> {
+        let mut p = u32::try_from(entries.len()).unwrap().to_be_bytes().to_vec();
+        for (item, assoc) in entries {
+            p.extend_from_slice(&item.to_be_bytes());
+            p.push(u8::try_from(assoc.len()).unwrap());
+            p.extend_from_slice(assoc);
+        }
+        full(b"ipma", 0, &p)
+    }
+
+    /// Each `(item, bytes)` lives in `idat` (construction method 1), one after the other.
+    fn idat_and_iloc(items: &[(u16, &[u8])]) -> Vec<u8> {
+        let mut iloc = vec![0x44, 0x00];
+        iloc.extend_from_slice(&u16::try_from(items.len()).unwrap().to_be_bytes());
+        let mut idat = Vec::new();
+        for (item, bytes) in items {
+            iloc.extend_from_slice(&item.to_be_bytes());
+            iloc.extend_from_slice(&1u16.to_be_bytes());
+            iloc.extend_from_slice(&0u16.to_be_bytes());
+            iloc.extend_from_slice(&1u16.to_be_bytes());
+            iloc.extend_from_slice(&u32::try_from(idat.len()).unwrap().to_be_bytes());
+            iloc.extend_from_slice(&u32::try_from(bytes.len()).unwrap().to_be_bytes());
+            idat.extend_from_slice(bytes);
+        }
+        let mut out = bx(b"idat", &idat);
+        out.extend_from_slice(&full(b"iloc", 1, &iloc));
+        out
+    }
+
+    /// `ftyp`, then a `meta` whose primary item is `primary` and whose items are `infes`.
+    /// `ipco` children are numbered from 1 in file order; an association byte's top bit marks the
+    /// property essential, as macOS writes it.
+    fn file(primary: u16, infes: &[Vec<u8>], ipco: &[u8], assoc: &[(u16, &[u8])], data: &[(u16, &[u8])]) -> Vec<u8> {
+        let mut ftyp = b"heic".to_vec();
+        ftyp.extend_from_slice(&0u32.to_be_bytes());
+        ftyp.extend_from_slice(b"mif1heic");
+        let mut items = u16::try_from(infes.len()).unwrap().to_be_bytes().to_vec();
+        items.extend(infes.iter().flatten());
+        let mut iprp = bx(b"ipco", ipco);
+        iprp.extend_from_slice(&ipma(assoc));
+
+        let mut meta = hdlr();
+        meta.extend_from_slice(&full(b"pitm", 0, &primary.to_be_bytes()));
+        meta.extend_from_slice(&full(b"iinf", 0, &items));
+        if primary == GRID_ID {
+            let mut p = GRID_ID.to_be_bytes().to_vec();
+            p.extend_from_slice(&1u16.to_be_bytes());
+            p.extend_from_slice(&PICTURE_ID.to_be_bytes());
+            meta.extend_from_slice(&full(b"iref", 0, &bx(b"dimg", &p)));
+        }
+        meta.extend_from_slice(&bx(b"iprp", &iprp));
+        meta.extend_from_slice(&idat_and_iloc(data));
+        let mut out = bx(b"ftyp", &ftyp);
+        out.extend_from_slice(&full(b"meta", 0, &meta));
+        out
+    }
+
+    /// The quadrant picture as the primary item, with an `imir` of `mirror_axis` and a `prof`
+    /// of `icc` when given.
+    fn picture_file(mirror_axis: Option<u8>, icc: Option<&[u8]>) -> Vec<u8> {
+        let mut ipco = ispe(64, 64);
+        ipco.extend_from_slice(&bx(b"hvcC", &QUAD_HVCC));
+        let mut assoc = vec![0x81, 0x82];
+        if let Some(axis) = mirror_axis {
+            ipco.extend_from_slice(&bx(b"imir", &[axis]));
+            assoc.push(0x80 | u8::try_from(assoc.len() + 1).unwrap());
+        }
+        if let Some(icc) = icc {
+            ipco.extend_from_slice(&colr_prof(icc));
+            assoc.push(0x80 | u8::try_from(assoc.len() + 1).unwrap());
+        }
+        file(PICTURE_ID, &[infe(PICTURE_ID, b"hvc1")], &ipco, &[(PICTURE_ID, assoc.as_slice())], &[(PICTURE_ID, &QUAD_HEVC)])
+    }
+
+    /// A 1x1 64x64 grid of the quadrant picture, with `grid_icc` on the grid item and `tile_icc`
+    /// on its single tile.
+    fn grid_file(grid_icc: Option<&[u8]>, tile_icc: Option<&[u8]>) -> Vec<u8> {
+        let mut ipco = ispe(64, 64);
+        ipco.extend_from_slice(&bx(b"hvcC", &QUAD_HVCC));
+        let (mut grid_assoc, mut tile_assoc, mut index) = (vec![0x81], vec![0x81, 0x82], 2u8);
+        if let Some(icc) = grid_icc {
+            index += 1;
+            ipco.extend_from_slice(&colr_prof(icc));
+            grid_assoc.push(0x80 | index);
+        }
+        if let Some(icc) = tile_icc {
+            index += 1;
+            ipco.extend_from_slice(&colr_prof(icc));
+            tile_assoc.push(0x80 | index);
+        }
+        // Version 0, flags 0, one row, one column, 64x64 output.
+        const DESCRIPTOR: &[u8] = &[0, 0, 0, 0, 0, 64, 0, 64];
+        file(
+            GRID_ID,
+            &[infe(GRID_ID, b"grid"), infe(PICTURE_ID, b"hvc1")],
+            &ipco,
+            &[(GRID_ID, grid_assoc.as_slice()), (PICTURE_ID, tile_assoc.as_slice())],
+            &[(GRID_ID, DESCRIPTOR), (PICTURE_ID, &QUAD_HEVC)],
+        )
+    }
+
+    /// The colour at the centre of each quadrant, as the nearest of the four the picture uses:
+    /// top left, top right, bottom left, bottom right.
+    fn quadrants(d: &Decoded) -> [&'static str; 4] {
+        assert_eq!((d.width, d.height, d.has_alpha, d.sixteen_bit), (64, 64, false, false));
+        [(16, 16), (48, 16), (16, 48), (48, 48)].map(|(x, y)| {
+            let i = (y * 64 + x) * 3;
+            let px = [d.data[i], d.data[i + 1], d.data[i + 2]].map(i32::from);
+            let named = [("red", [255, 0, 0]), ("green", [0, 255, 0]), ("blue", [0, 0, 255]), ("white", [255, 255, 255])];
+            named.iter().min_by_key(|(_, c)| (0..3).map(|k| (px[k] - c[k]).pow(2)).sum::<i32>()).unwrap().0
+        })
+    }
+
+    fn decode_quadrants(bytes: &[u8], apply_transforms: bool) -> [&'static str; 4] {
+        quadrants(&decode(bytes, &Options { apply_transforms, ..Default::default() }).unwrap())
+    }
+
+    #[test]
+    fn the_quadrant_picture_decodes_as_coded() {
+        assert_eq!(decode_quadrants(&picture_file(None, None), true), ["red", "green", "blue", "white"]);
+    }
+
+    #[test]
+    fn imir_axis_0_flips_top_and_bottom() {
+        // As libheif reads it ("flip image vertically") and the Nokia suite describes C042
+        // ("vertically mirrored"). heic-rs, the previous decoder, flipped left-right here.
+        let bytes = picture_file(Some(0), None);
+        assert_eq!(decode_quadrants(&bytes, true), ["blue", "white", "red", "green"]);
+        assert_eq!(decode_quadrants(&bytes, false), ["red", "green", "blue", "white"], "as coded without transforms");
+    }
+
+    #[test]
+    fn imir_axis_1_flips_left_and_right() {
+        let bytes = picture_file(Some(1), None);
+        assert_eq!(decode_quadrants(&bytes, true), ["green", "red", "white", "blue"]);
+        assert_eq!(decode_quadrants(&bytes, false), ["red", "green", "blue", "white"], "as coded without transforms");
+    }
+
+    fn icc_of(bytes: &[u8]) -> Option<Vec<u8>> {
+        decode(bytes, &Options::default()).unwrap().icc
+    }
+
+    #[test]
+    fn a_grid_inherits_its_tiles_icc_profile() {
+        // `colr` is optional on a `grid` derivation, and phone cameras write it on the tiles
+        // instead: a OnePlus 11 photograph carries one `prof` (Display P3) on each of its 48 tiles
+        // and nothing on the grid. Losing it would open the photo as if it were sRGB.
+        let bytes = grid_file(None, Some(TILE_ICC));
+        assert_eq!(decode_quadrants(&bytes, true), ["red", "green", "blue", "white"], "a 1x1 grid of the picture");
+        assert_eq!(icc_of(&bytes).as_deref(), Some(TILE_ICC));
+    }
+
+    #[test]
+    fn a_grids_own_profile_wins_over_its_tiles() {
+        assert_eq!(icc_of(&grid_file(Some(GRID_ICC), Some(TILE_ICC))).as_deref(), Some(GRID_ICC));
+    }
+
+    #[test]
+    fn an_unlabelled_grid_has_no_profile() {
+        assert_eq!(icc_of(&grid_file(None, None)), None);
+    }
+
+    #[test]
+    fn a_coded_picture_resolves_its_own_profile() {
+        assert_eq!(icc_of(&picture_file(None, Some(GRID_ICC))).as_deref(), Some(GRID_ICC));
+        assert_eq!(icc_of(&picture_file(None, None)), None);
     }
 }
