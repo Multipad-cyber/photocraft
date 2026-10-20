@@ -20,7 +20,7 @@ input, and every call into it also runs under `catch_unwind` as a last resort.
 
 ## Why it is a separate, optional crate
 
-- **A young decoder.** heic-decoder is new, so it is pinned exactly (`=0.1.0`); moving the pin
+- **A young decoder.** heic-decoder is new, so it is pinned exactly (`=0.1.1`); moving the pin
   is a reviewed change (re-run `cargo fuzz run decode_heif` in
   `crates/codecs` and `cargo xtask test-corpus`).
 - **HEVC patents are a distributor's call.** HEVC is patent-encumbered in some jurisdictions, so
