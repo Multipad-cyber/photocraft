@@ -38,7 +38,7 @@ pub struct Info {
 /// Decode settings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Options {
-    /// Refuse images with more pixels than this (checked before decoding).
+    /// Refuse images with more pixels than this, as coded (checked before decoding).
     pub max_pixels: u64,
     /// Apply the container's rotation, mirror and crop (`irot`/`imir`/`clap`).
     pub apply_transforms: bool,
@@ -137,10 +137,12 @@ pub fn decode(bytes: &[u8], options: &Options) -> Result<Decoded, Error> {
 
 fn decode_unguarded(bytes: &[u8], options: &Options) -> Result<Decoded, Error> {
     let info = probe_unguarded(bytes)?;
-    let (w, h) = if options.apply_transforms { (info.width, info.height) } else { (info.coded_width, info.coded_height) };
+    // The decoder allocates the coded picture before cropping it, and the transforms never make
+    // it larger, so the coded size bounds the work either way.
+    let (w, h) = (info.coded_width, info.coded_height);
     let pixels = u64::from(w) * u64::from(h);
     if pixels > options.max_pixels {
-        return Err(Error::Limit(format!("{w}x{h} is {pixels} pixels, more than the {} allowed", options.max_pixels)));
+        return Err(Error::Limit(format!("{w}x{h} as coded is {pixels} pixels, more than the {} allowed", options.max_pixels)));
     }
     let image = heic_decoder::decode_with(bytes, &DecodeOptions { apply_transforms: options.apply_transforms }).map_err(err)?;
     let has_alpha = image.alpha.is_some();
@@ -419,6 +421,37 @@ mod tests {
             &[(GRID_ID, grid_assoc.as_slice()), (PICTURE_ID, tile_assoc.as_slice())],
             &[(GRID_ID, DESCRIPTOR), (PICTURE_ID, &QUAD_HEVC)],
         )
+    }
+
+    /// A 1x1 grid of the quadrant picture declaring a `size` x `size` canvas, with a centred
+    /// 64x64 `clap` on the grid item: the probe reports the canvas as the coded size.
+    fn cropped_grid_file(size: u16) -> Vec<u8> {
+        let mut ipco = ispe(64, 64);
+        ipco.extend_from_slice(&bx(b"hvcC", &QUAD_HVCC));
+        ipco.extend_from_slice(&ispe(size.into(), size.into()));
+        let clap: Vec<u8> = [64, 1, 64, 1, 0, 1, 0, 1].iter().flat_map(|v: &u32| v.to_be_bytes()).collect();
+        ipco.extend_from_slice(&bx(b"clap", &clap));
+        let mut descriptor = vec![0, 0, 0, 0];
+        descriptor.extend_from_slice(&size.to_be_bytes());
+        descriptor.extend_from_slice(&size.to_be_bytes());
+        file(
+            GRID_ID,
+            &[infe(GRID_ID, b"grid"), infe(PICTURE_ID, b"hvc1")],
+            &ipco,
+            &[(GRID_ID, &[0x83, 0x84]), (PICTURE_ID, &[0x81, 0x82])],
+            &[(GRID_ID, descriptor.as_slice()), (PICTURE_ID, &QUAD_HEVC)],
+        )
+    }
+
+    #[test]
+    fn the_pixel_limit_applies_to_the_coded_size_not_the_crop() {
+        let bytes = cropped_grid_file(16384);
+        let info = probe(&bytes).unwrap();
+        assert_eq!((info.width, info.height, info.coded_width, info.coded_height), (64, 64, 16384, 16384));
+        for apply_transforms in [true, false] {
+            let r = decode(&bytes, &Options { max_pixels: 1 << 26, apply_transforms });
+            assert!(matches!(&r, Err(Error::Limit(m)) if m.contains("16384x16384")), "transforms {apply_transforms}: {r:?}");
+        }
     }
 
     /// The colour at the centre of each quadrant, as the nearest of the four the picture uses:
