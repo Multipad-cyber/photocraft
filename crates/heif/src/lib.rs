@@ -63,11 +63,28 @@ pub struct Decoded {
     pub data: Vec<u8>,
     /// The primary image's ICC profile.
     pub icc: Option<Vec<u8>>,
+    /// The primary image's `nclx` colour description (inherited from its tiles like [`Self::icc`]).
+    /// The decoder has already applied its matrix and range; its primaries and transfer
+    /// characteristics describe the RGB samples returned.
+    pub nclx: Option<Nclx>,
     /// EXIF as a TIFF structure (without HEIF's offset header). Its Orientation tag only mirrors
     /// what the container says; it is returned verbatim.
     pub exif: Option<Vec<u8>>,
     /// The XMP packet.
     pub xmp: Option<String>,
+}
+
+/// A `colr` box of type `nclx`: ITU-T H.273 code points (CICP), as written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Nclx {
+    /// Colour primaries: 1 BT.709, 9 BT.2020, 12 P3-D65…
+    pub primaries: u16,
+    /// Transfer characteristics: 13 sRGB, 1/6/14/15 BT.709, 16 PQ, 18 HLG…
+    pub transfer: u16,
+    /// Matrix coefficients (already applied by the decoder).
+    pub matrix: u16,
+    /// Full-range samples (already applied by the decoder).
+    pub full_range: bool,
 }
 
 /// Why a file could not be decoded.
@@ -167,8 +184,26 @@ fn decode_unguarded(bytes: &[u8], options: &Options) -> Result<Decoded, Error> {
         (false, false) => image.to_rgb8().map_err(err)?.data,
     };
     let metadata = image.metadata;
+    // The container's `nclx`, inherited from the tiles like the profile. Not `image.color_info`,
+    // which falls back to the HEVC stream's VUI.
+    let nclx = metadata.color_info.map(|c| Nclx {
+        primaries: c.color_primaries,
+        transfer: c.transfer_characteristics,
+        matrix: c.matrix_coefficients,
+        full_range: c.full_range,
+    });
     let xmp = metadata.xmp.and_then(|x| String::from_utf8(x).ok()).map(|x| x.trim_end_matches('\0').to_string());
-    Ok(Decoded { width: size(image.width)?, height: size(image.height)?, has_alpha, sixteen_bit, data, icc: metadata.icc_profile, exif: metadata.exif, xmp })
+    Ok(Decoded {
+        width: size(image.width)?,
+        height: size(image.height)?,
+        has_alpha,
+        sixteen_bit,
+        data,
+        icc: metadata.icc_profile,
+        nclx,
+        exif: metadata.exif,
+        xmp,
+    })
 }
 
 /// Turns premultiplied RGBA (a `prem` reference in the file) into straight alpha, in place.
@@ -316,6 +351,17 @@ mod tests {
         bx(b"colr", &p)
     }
 
+    /// A `colr` box of type `nclx`, laid out as ISO/IEC 23008-12 says: three big-endian `u16`
+    /// code points, then the full-range flag in the top bit of a byte.
+    fn colr_nclx(primaries: u16, transfer: u16, matrix: u16, full_range: bool) -> Vec<u8> {
+        let mut p = b"nclx".to_vec();
+        for v in [primaries, transfer, matrix] {
+            p.extend_from_slice(&v.to_be_bytes());
+        }
+        p.push(if full_range { 0x80 } else { 0 });
+        bx(b"colr", &p)
+    }
+
     fn ispe(w: u32, h: u32) -> Vec<u8> {
         let mut p = w.to_be_bytes().to_vec();
         p.extend_from_slice(&h.to_be_bytes());
@@ -382,6 +428,11 @@ mod tests {
     /// The quadrant picture as the primary item, with an `imir` of `mirror_axis` and a `prof`
     /// of `icc` when given.
     fn picture_file(mirror_axis: Option<u8>, icc: Option<&[u8]>) -> Vec<u8> {
+        picture_file_colr(mirror_axis, icc.map(colr_prof))
+    }
+
+    /// [`picture_file`] with a whole `colr` box.
+    fn picture_file_colr(mirror_axis: Option<u8>, colr: Option<Vec<u8>>) -> Vec<u8> {
         let mut ipco = ispe(64, 64);
         ipco.extend_from_slice(&bx(b"hvcC", &QUAD_HVCC));
         let mut assoc = vec![0x81, 0x82];
@@ -389,8 +440,8 @@ mod tests {
             ipco.extend_from_slice(&bx(b"imir", &[axis]));
             assoc.push(0x80 | u8::try_from(assoc.len() + 1).unwrap());
         }
-        if let Some(icc) = icc {
-            ipco.extend_from_slice(&colr_prof(icc));
+        if let Some(colr) = colr {
+            ipco.extend_from_slice(&colr);
             assoc.push(0x80 | u8::try_from(assoc.len() + 1).unwrap());
         }
         file(PICTURE_ID, &[infe(PICTURE_ID, b"hvc1")], &ipco, &[(PICTURE_ID, assoc.as_slice())], &[(PICTURE_ID, &QUAD_HEVC)])
@@ -399,17 +450,22 @@ mod tests {
     /// A 1x1 64x64 grid of the quadrant picture, with `grid_icc` on the grid item and `tile_icc`
     /// on its single tile.
     fn grid_file(grid_icc: Option<&[u8]>, tile_icc: Option<&[u8]>) -> Vec<u8> {
+        grid_file_colr(grid_icc.map(colr_prof), tile_icc.map(colr_prof))
+    }
+
+    /// [`grid_file`] with whole `colr` boxes.
+    fn grid_file_colr(grid_colr: Option<Vec<u8>>, tile_colr: Option<Vec<u8>>) -> Vec<u8> {
         let mut ipco = ispe(64, 64);
         ipco.extend_from_slice(&bx(b"hvcC", &QUAD_HVCC));
         let (mut grid_assoc, mut tile_assoc, mut index) = (vec![0x81], vec![0x81, 0x82], 2u8);
-        if let Some(icc) = grid_icc {
+        if let Some(colr) = grid_colr {
             index += 1;
-            ipco.extend_from_slice(&colr_prof(icc));
+            ipco.extend_from_slice(&colr);
             grid_assoc.push(0x80 | index);
         }
-        if let Some(icc) = tile_icc {
+        if let Some(colr) = tile_colr {
             index += 1;
-            ipco.extend_from_slice(&colr_prof(icc));
+            ipco.extend_from_slice(&colr);
             tile_assoc.push(0x80 | index);
         }
         // Version 0, flags 0, one row, one column, 64x64 output.
@@ -519,5 +575,26 @@ mod tests {
     fn a_coded_picture_resolves_its_own_profile() {
         assert_eq!(icc_of(&picture_file(None, Some(GRID_ICC))).as_deref(), Some(GRID_ICC));
         assert_eq!(icc_of(&picture_file(None, None)), None);
+    }
+
+    /// An iPhone 10-bit HDR HEIC's description (#6752): BT.2020 primaries, ARIB STD-B67 (HLG)
+    /// transfer, BT.2020 non-constant-luminance matrix, full range.
+    const HLG: Nclx = Nclx { primaries: 9, transfer: 18, matrix: 9, full_range: true };
+
+    fn nclx_of(bytes: &[u8]) -> Option<Nclx> {
+        decode(bytes, &Options::default()).unwrap().nclx
+    }
+
+    #[test]
+    fn a_coded_pictures_nclx_is_read() {
+        assert_eq!(nclx_of(&picture_file_colr(None, Some(colr_nclx(9, 18, 9, true)))), Some(HLG));
+        let sdr = Nclx { primaries: 1, transfer: 13, matrix: 6, full_range: false };
+        assert_eq!(nclx_of(&picture_file_colr(None, Some(colr_nclx(1, 13, 6, false)))), Some(sdr));
+        assert_eq!(nclx_of(&picture_file(None, Some(TILE_ICC))), None, "an ICC profile is not an nclx");
+    }
+
+    #[test]
+    fn a_grid_inherits_its_tiles_nclx() {
+        assert_eq!(nclx_of(&grid_file_colr(None, Some(colr_nclx(9, 18, 9, true)))), Some(HLG));
     }
 }
