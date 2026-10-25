@@ -112,6 +112,12 @@ fn set_frame_delay(s: &mut Session, p: &Value) -> Result<Value> {
         Some(v) => Some(v.as_u64().and_then(|f| usize::try_from(f).ok()).ok_or_else(|| bad(cmd, format!("`frame` must be a frame index, got {v}")))?),
         None => None,
     };
+    // Delays are stored up to the frame, so a loaded timeline longer than any command makes (a
+    // crafted file) is refused before it can size that allocation.
+    let duration = s.active().and_then(|d| d.doc.timeline.as_ref()).map_or(0, |t| t.duration);
+    if duration > MAX_DURATION {
+        return Err(bad(cmd, format!("the timeline is {duration} frames; frame delays are limited to {MAX_DURATION} frames")));
+    }
     with_timeline(s, |t| {
         let Some(t) = t else { return };
         if all {
@@ -340,6 +346,26 @@ mod tests {
         s.execute("timeline.setFrameDelay", json!({"frame": 3, "ms": 200})).unwrap();
         s.execute("timeline.setProps", json!({"duration": 2})).unwrap();
         assert_eq!(s.active().unwrap().doc.timeline.as_ref().unwrap().delays_ms, [50, 50]);
+    }
+
+    /// A loaded timeline longer than `MAX_DURATION` (a crafted file) is refused before delays are
+    /// stored up to its playhead, which would size an allocation from the file.
+    #[test]
+    fn set_frame_delay_refuses_an_oversized_loaded_timeline() {
+        let mut s = Session::new();
+        s.execute("file.new", json!({"width": 8, "height": 8})).unwrap();
+        let st = s.active_mut().unwrap();
+        let mut doc = (*st.doc).clone();
+        doc.timeline = Some(Timeline { fps: 10.0, duration: usize::MAX, current: usize::MAX - 1, work_start: 0, work_end: 1, delays_ms: Vec::new() });
+        st.doc = Arc::new(doc);
+        let before = snapshot(&s);
+        for p in [json!({"ms": 100}), json!({"ms": 100, "frame": u64::MAX})] {
+            let e = s.execute("timeline.setFrameDelay", p.clone()).expect_err(&format!("{p} must be rejected"));
+            assert!(matches!(e, EngineError::BadParams { .. }), "{p}: {e}");
+            assert_eq!(snapshot(&s), before, "{p}: nothing changes");
+        }
+        // Control: `all` stores nothing per frame, but is refused the same way.
+        assert!(s.execute("timeline.setFrameDelay", json!({"ms": 100, "all": true})).is_err());
     }
 
     /// Bad `ms` or `frame` values are rejected and change nothing.

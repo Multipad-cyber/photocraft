@@ -101,8 +101,9 @@ impl Timeline {
     }
 
     /// How long frame `f` shows, in milliseconds: its own delay when it has one, else `1000 / fps`.
+    /// A stored 0 (only a hand-edited file has one) counts as none, or playback would never wait.
     pub fn frame_ms(&self, f: usize) -> u32 {
-        self.delays_ms.get(f).copied().unwrap_or_else(|| (1000.0 / valid_fps(self.fps)).round().clamp(1.0, u32::MAX as f32) as u32)
+        self.delays_ms.get(f).copied().filter(|&d| d > 0).unwrap_or_else(|| (1000.0 / valid_fps(self.fps)).round().clamp(1.0, u32::MAX as f32) as u32)
     }
 
     /// Playhead time in seconds.
@@ -147,6 +148,10 @@ mod tests {
         t.duration = 1;
         t.clamp();
         assert_eq!(t.delays_ms, [50]);
+        // A stored 0 (a hand-edited file) shows at the rate, not never.
+        t.fps = 10.0;
+        t.delays_ms = vec![0];
+        assert_eq!(t.frame_ms(0), 100);
     }
 
     /// #1009: stepping never panics or leaves the timeline, whatever was stored.
