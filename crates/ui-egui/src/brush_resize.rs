@@ -308,7 +308,7 @@ mod tests {
         assert!(h.state().brush_resize.is_some());
         assert!(h.state().session.tools.brush.size > size0, "dragging right grew the brush");
         assert!(h.state().session.tools.brush.hardness > 0.2, "dragging down hardened it");
-        assert!(h.ctx.memory(|m| m.area_rect(egui::Id::new("brush-resize-readout"))).is_some(), "the readout shows mid-drag");
+        assert!(h.ctx.memory(|m| m.area_rect(egui::Id::unique("brush-resize-readout"))).is_some(), "the readout shows mid-drag");
         assert_eq!(h.output().platform_output.cursor_icon, egui::CursorIcon::None, "the pointer hides");
         press(&mut h, c + vec2(60.0, 48.0), false);
         h.event(egui::Event::ModifiersChanged(Modifiers::NONE));
@@ -370,7 +370,7 @@ mod tests {
             assert!(r.secondary);
             assert!(h.state().session.tools.brush.size > size0, "right grows the brush");
             assert!(h.state().session.tools.brush.hardness > 0.2, "down hardens it");
-            assert!(h.ctx.memory(|m| m.area_rect(egui::Id::new("brush-resize-readout"))).is_some(), "the readout shows");
+            assert!(h.ctx.memory(|m| m.area_rect(egui::Id::unique("brush-resize-readout"))).is_some(), "the readout shows");
             assert_eq!(h.output().platform_output.cursor_icon, egui::CursorIcon::None);
             button(&mut h, end, PointerButton::Secondary, false, Modifiers::ALT);
             h.event(egui::Event::ModifiersChanged(Modifiers::NONE));
@@ -534,5 +534,34 @@ mod tests {
         assert_eq!(preview_tint(&app), Color32::from_rgba_unmultiplied(0, 255, 128, 110));
         app.session.prefs.edit(|p| p.cursors.brush_preview_color = "nonsense".into());
         assert_eq!(preview_tint(&app), Color32::from_rgba_unmultiplied(255, 0, 0, 110), "unreadable values keep the red");
+    }
+
+    #[test]
+    fn stylus_barrel_button_resizes_with_alt_and_never_samples_color() {
+        let mut a = app(Tool::Brush);
+        a.services.right_button_down = Some(Box::new(|| true));
+        a.sync_views();
+        let mut h = canvas(a);
+        let size0 = h.state().session.tools.brush.size;
+        let c = h.state().last_canvas_rect.center();
+        h.event(egui::Event::ModifiersChanged(Modifiers::ALT));
+        h.event(egui::Event::PointerMoved(c));
+        h.run_steps(1);
+        button(&mut h, c, PointerButton::Primary, true, Modifiers::ALT);
+        let mut p = c;
+        for _ in 0..6 {
+            p += vec2(10.0, 8.0);
+            h.event(egui::Event::PointerMoved(p));
+            h.run_steps(1);
+        }
+        let r = h.state().brush_resize.expect("resizing via stylus barrel button");
+        assert!(r.secondary);
+        assert!(h.state().session.tools.brush.size > size0, "right grows the brush");
+        assert!(h.state().session.tools.brush.hardness > 0.2, "down hardens the brush");
+        assert!(!h.state().alt_sampling, "eyedropper never triggered");
+        assert!(!h.state().session.journal.iter().any(|(id, _)| id == "paint.stroke"), "nothing painted");
+        button(&mut h, p, PointerButton::Primary, false, Modifiers::ALT);
+        h.run_steps(2);
+        assert!(h.state().brush_resize.is_none());
     }
 }
