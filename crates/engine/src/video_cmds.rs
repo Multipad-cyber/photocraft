@@ -369,7 +369,7 @@ fn new_from_file(s: &mut Session, p: &Value) -> Result<Value> {
         store(doc);
         if doc.timeline.is_none() {
             let mut t = Timeline::new(n, fps);
-            t.delays_ms = delays_ms;
+            t.delays_ms = std::sync::Arc::new(delays_ms);
             doc.timeline = Some(t);
         } else if let Some(t) = &mut doc.timeline {
             grow_duration(t, n);

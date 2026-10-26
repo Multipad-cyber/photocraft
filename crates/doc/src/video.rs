@@ -2,6 +2,8 @@
 //! Video layers (Layer › Video Layers) show their content for the current frame; this type is the
 //! shared clock. Frame-animation and video-timeline modes both reduce to "which frame is current".
 
+use std::sync::Arc;
+
 use serde::{Deserialize, Serialize};
 
 use photocraft_raster::Surface;
@@ -71,15 +73,17 @@ pub struct Timeline {
     /// Work-area end frame (exclusive).
     pub work_end: usize,
     /// How long each frame shows, in milliseconds (a GIF stores one per frame). Empty, or short of
-    /// `duration`, means the frames past it run at `fps`.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub delays_ms: Vec<u32>,
+    /// `duration`, means the frames past it run at `fps`. `Arc`-shared like every large payload in
+    /// a document (up to a million entries), so a snapshot never copies it; edit with
+    /// `Arc::make_mut`.
+    #[serde(default, skip_serializing_if = "no_delays")]
+    pub delays_ms: Arc<Vec<u32>>,
 }
 
 impl Timeline {
     pub fn new(duration: usize, fps: f32) -> Self {
         let d = duration.max(1);
-        Timeline { fps: valid_fps(fps), duration: d, current: 0, work_start: 0, work_end: d, delays_ms: Vec::new() }
+        Timeline { fps: valid_fps(fps), duration: d, current: 0, work_start: 0, work_end: d, delays_ms: Arc::default() }
     }
 
     /// Keep every index inside `0..duration` and the work area non-empty.
@@ -89,7 +93,9 @@ impl Timeline {
         self.current = self.current.min(self.duration - 1);
         self.work_start = self.work_start.min(self.duration - 1);
         self.work_end = self.work_end.clamp(self.work_start + 1, self.duration);
-        self.delays_ms.truncate(self.duration);
+        if self.delays_ms.len() > self.duration {
+            Arc::make_mut(&mut self.delays_ms).truncate(self.duration);
+        }
     }
 
     /// Move the playhead `delta` frames, stopping at the first and last frame. Saturating, so it's
@@ -110,6 +116,11 @@ impl Timeline {
     pub fn time(&self) -> f32 {
         self.current as f32 / self.fps.max(1e-3)
     }
+}
+
+/// No per-frame delays to save.
+fn no_delays(d: &Arc<Vec<u32>>) -> bool {
+    d.is_empty()
 }
 
 /// A usable frame rate: positive and finite, else the 30 fps default.
@@ -139,7 +150,7 @@ mod tests {
     #[test]
     fn frame_delays_fall_back_to_the_rate() {
         let mut t = Timeline::new(3, 10.0);
-        t.delays_ms = vec![50, 500];
+        t.delays_ms = Arc::new(vec![50, 500]);
         assert_eq!([t.frame_ms(0), t.frame_ms(1), t.frame_ms(2), t.frame_ms(usize::MAX)], [50, 500, 100, 100]);
         t.fps = f32::NAN;
         assert_eq!(t.frame_ms(2), 33);
@@ -147,11 +158,30 @@ mod tests {
         assert_eq!(t.frame_ms(2), 1_000_000);
         t.duration = 1;
         t.clamp();
-        assert_eq!(t.delays_ms, [50]);
+        assert_eq!(*t.delays_ms, [50]);
         // A stored 0 (a hand-edited file) shows at the rate, not never.
         t.fps = 10.0;
-        t.delays_ms = vec![0];
+        t.delays_ms = Arc::new(vec![0]);
         assert_eq!(t.frame_ms(0), 100);
+    }
+
+    /// A copy of the timeline (every document snapshot) shares the delays; they save as a plain
+    /// list, and none at all when empty, so older files and builds read them unchanged.
+    #[test]
+    fn frame_delays_are_shared_and_save_as_a_list() {
+        let mut t = Timeline::new(3, 10.0);
+        let empty = serde_json::to_value(&t).unwrap();
+        assert!(empty.get("delays_ms").is_none(), "{empty}");
+        t.delays_ms = Arc::new(vec![50, 500]);
+        let copy = t.clone();
+        assert!(Arc::ptr_eq(&t.delays_ms, &copy.delays_ms));
+        let saved = serde_json::to_value(&t).unwrap();
+        assert_eq!(saved["delays_ms"], serde_json::json!([50, 500]));
+        assert_eq!(serde_json::from_value::<Timeline>(saved).unwrap(), t);
+        // An edit copies them once and leaves the snapshot alone.
+        let mut edited = copy.clone();
+        Arc::make_mut(&mut edited.delays_ms)[0] = 70;
+        assert_eq!((*copy.delays_ms)[0], 50);
     }
 
     /// #1009: stepping never panics or leaves the timeline, whatever was stored.
@@ -166,7 +196,7 @@ mod tests {
         t.step(i64::MIN);
         assert_eq!(t.current, 0);
         for duration in [0, usize::MAX] {
-            let mut t = Timeline { fps: f32::INFINITY, duration, current: usize::MAX, work_start: 0, work_end: 0, delays_ms: Vec::new() };
+            let mut t = Timeline { fps: f32::INFINITY, duration, current: usize::MAX, work_start: 0, work_end: 0, delays_ms: Arc::default() };
             t.step(1);
             assert_eq!(t.current, duration.saturating_sub(1));
             t.clamp();

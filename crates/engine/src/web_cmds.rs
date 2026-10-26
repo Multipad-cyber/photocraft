@@ -899,14 +899,17 @@ fn save_for_web(s: &mut Session, p: &Value) -> Result<Value> {
 /// the timeline's length times the image's size is input, so it is capped before allocating.
 const MAX_ANIMATED_GIF_PIXELS: u64 = 1 << 30;
 
-/// Every frame of the timeline as one animated GIF. Each frame is laid out and quantized like the
-/// still image, to its own palette, and shows for its own frame delay. Edits on the frame at the
-/// playhead are kept, as in Render Video.
-fn animated_gif(doc: &Document, p: &Value, st: &WebSettings, frames: usize) -> Result<(Vec<u8>, u32, u32)> {
+/// Every frame of the timeline as one animated GIF of `w` × `h` (the still image's layout). Each
+/// frame is laid out and quantized like the still image, to its own palette, and shows for its own
+/// frame delay. Edits on the frame at the playhead are kept, as in Render Video. The size is
+/// checked against `MAX_ANIMATED_GIF_PIXELS` before any frame is rendered.
+fn animated_gif(doc: &Document, p: &Value, st: &WebSettings, frames: usize, (w, h): (u32, u32)) -> Result<Vec<u8>> {
+    if (frames as u64).saturating_mul(u64::from(w) * u64::from(h)) > MAX_ANIMATED_GIF_PIXELS {
+        return Err(other(format!("{frames} frames of {w} × {h} are too many to save as an animated GIF (limit {MAX_ANIMATED_GIF_PIXELS} pixels in all)")));
+    }
     let mut doc = doc.clone();
     crate::video_cmds::store(&mut doc);
     let mut gframes = Vec::with_capacity(frames.min(1024));
-    let mut size = None;
     for f in 0..frames {
         let mut at = doc.clone();
         if let Some(t) = &mut at.timeline {
@@ -915,11 +918,9 @@ fn animated_gif(doc: &Document, p: &Value, st: &WebSettings, frames: usize) -> R
         crate::video_cmds::sync(&mut at);
         let (wdoc, _, _) = web_document(&at, p, st)?;
         let rect = wdoc.bounds();
-        let (w, h) = (rect.width(), rect.height());
-        if size.is_none() && (frames as u64).saturating_mul(u64::from(w) * u64::from(h)) > MAX_ANIMATED_GIF_PIXELS {
-            return Err(other(format!("{frames} frames of {w} × {h} are too many to save as an animated GIF (limit {MAX_ANIMATED_GIF_PIXELS} pixels in all)")));
+        if (rect.width(), rect.height()) != (w, h) {
+            return Err(other(format!("frame {f} lays out at {} × {}, not {w} × {h}", rect.width(), rect.height())));
         }
-        size.get_or_insert((w, h));
         let buf = photocraft_compose::flatten(&wdoc);
         let ix = indexed_pixels(&buf.px, wdoc.size.width as usize, rect, st)?;
         let delay_ms = doc.timeline.as_ref().map_or(100, |t| t.frame_ms(f));
@@ -930,9 +931,7 @@ fn animated_gif(doc: &Document, p: &Value, st: &WebSettings, frames: usize) -> R
             delay_cs: crate::video_cmds::delay_cs(delay_ms),
         });
     }
-    let (w, h) = size.ok_or_else(|| other("the timeline has no frames"))?;
-    let bytes = photocraft_codecs::web::encode_gif_animated(w, h, &gframes, true).map_err(other)?;
-    Ok((bytes, w, h))
+    photocraft_codecs::web::encode_gif_animated(w, h, &gframes, true).map_err(other)
 }
 
 /// Save for Web through a platform writer (native files or browser downloads).
@@ -1009,7 +1008,8 @@ fn save_for_web_impl(s: &mut Session, p: &Value, write: &mut dyn FnMut(&str, &[u
         if frames > crate::timeline_cmds::MAX_DURATION {
             return Err(other(format!("the timeline is {frames} frames; an animated GIF is limited to {}", crate::timeline_cmds::MAX_DURATION)));
         }
-        let (bytes, w, h) = animated_gif(&doc, p, &st, frames)?;
+        let (w, h) = (wdoc.bounds().width(), wdoc.bounds().height());
+        let bytes = animated_gif(&doc, p, &st, frames, (w, h))?;
         write(path, &bytes)?;
         remember_web_settings(s, cmd, &last_web);
         s.file_menu.last_web = Some(last_web);

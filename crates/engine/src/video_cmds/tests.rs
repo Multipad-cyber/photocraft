@@ -362,12 +362,12 @@ fn gif_frame_delays_time_the_timeline_and_render_back() {
     let mut s = session();
     s.execute("layer.videoLayers.newVideoLayerFromFile", json!({"path": path})).unwrap();
     let t = s.active().unwrap().doc.timeline.clone().unwrap();
-    assert_eq!(t.delays_ms, [50, 500, 50, 100]);
+    assert_eq!(*t.delays_ms, [50, 500, 50, 100]);
     assert_eq!(t.fps, 20.0);
     assert_eq!(rendered_gif_delays(&s), [5, 50, 5, 10]);
     // A second GIF on the same timeline leaves its timing alone.
     s.execute("layer.videoLayers.newVideoLayerFromFile", json!({"path": path})).unwrap();
-    assert_eq!(s.active().unwrap().doc.timeline.as_ref().unwrap().delays_ms, [50, 500, 50, 100]);
+    assert_eq!(*s.active().unwrap().doc.timeline.as_ref().unwrap().delays_ms, [50, 500, 50, 100]);
 
     let mut s = session();
     s.execute("layer.videoLayers.newVideoLayerFromFile", json!({"path": path, "fps": 10.0})).unwrap();

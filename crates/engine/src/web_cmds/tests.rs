@@ -1226,5 +1226,7 @@ fn save_for_web_gif_rejects_an_oversized_animation() {
         wrote = true;
         Ok(())
     });
-    assert!(r.is_err() && !wrote, "{r:?}");
+    let e = r.expect_err("a million 64 × 48 frames are over the limit");
+    assert!(e.to_string().contains("1000000 frames of 64 × 48 are too many"), "{e}");
+    assert!(!wrote);
 }

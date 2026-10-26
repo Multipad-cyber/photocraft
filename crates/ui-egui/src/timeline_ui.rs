@@ -170,12 +170,16 @@ pub fn windows(app: &mut PhotocraftApp, ctx: &egui::Context) {
         if let Some(t) = app.session.active().and_then(|d| d.doc.timeline.clone()) {
             let now = ctx.input(|i| i.time);
             let period = f64::from(t.frame_ms(t.current)) / 1000.0;
-            if now - app.ui.timeline.last_time >= period {
+            let waited = now - app.ui.timeline.last_time;
+            if waited >= period {
                 app.ui.timeline.last_time = now;
                 let next = (t.current + 1) % t.duration.max(1);
                 let _ = app.run("timeline.setFrame", json!({ "frame": next as u64 }));
+                ctx.request_repaint();
+            } else {
+                // Wake when the frame is due rather than every frame: a frame can show for seconds.
+                ctx.request_repaint_after(std::time::Duration::from_secs_f64((period - waited).max(0.0)));
             }
-            ctx.request_repaint();
         } else {
             app.ui.timeline.playing = false;
         }
