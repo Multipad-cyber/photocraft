@@ -112,9 +112,13 @@ impl Timeline {
         self.delays_ms.get(f).copied().filter(|&d| d > 0).unwrap_or_else(|| (1000.0 / valid_fps(self.fps)).round().clamp(1.0, u32::MAX as f32) as u32)
     }
 
-    /// Playhead time in seconds.
+    /// Playhead time in seconds: the delays of the frames before it, at `fps` for those without
+    /// one. Only the stored delays are summed, so a loaded `current` of any size costs nothing.
     pub fn time(&self) -> f32 {
-        self.current as f32 / self.fps.max(1e-3)
+        let fps = f64::from(valid_fps(self.fps));
+        let stored = self.delays_ms.get(..self.current.min(self.delays_ms.len())).unwrap_or(&[]);
+        let ms: f64 = stored.iter().map(|&d| if d > 0 { f64::from(d) } else { 1000.0 / fps }).sum();
+        (ms / 1000.0 + (self.current - stored.len()) as f64 / fps) as f32
     }
 }
 
@@ -163,6 +167,28 @@ mod tests {
         t.fps = 10.0;
         t.delays_ms = Arc::new(vec![0]);
         assert_eq!(t.frame_ms(0), 100);
+    }
+
+    /// The playhead time adds up the delays before it: frames with their own delay show for it,
+    /// the rest (and a stored 0) at the rate.
+    #[test]
+    fn time_follows_the_frame_delays() {
+        let mut t = Timeline::new(4, 10.0);
+        t.delays_ms = Arc::new(vec![50, 500]);
+        let at = |t: &mut Timeline, f| {
+            t.current = f;
+            t.time()
+        };
+        for (f, s) in [(0, 0.0), (1, 0.05), (2, 0.55), (3, 0.65)] {
+            assert!((at(&mut t, f) - s).abs() < 1e-6, "frame {f}: {} s, want {s}", t.time());
+        }
+        t.delays_ms = Arc::new(vec![0, 500]);
+        assert!((at(&mut t, 2) - 0.6).abs() < 1e-6, "{}", t.time());
+        // Control: without delays it is still frames / fps; a loaded huge playhead stays finite.
+        t.delays_ms = Arc::default();
+        assert!((at(&mut t, 3) - 0.3).abs() < 1e-6);
+        t.delays_ms = Arc::new(vec![50]);
+        assert!(at(&mut t, usize::MAX).is_finite());
     }
 
     /// A copy of the timeline (every document snapshot) shares the delays; they save as a plain
